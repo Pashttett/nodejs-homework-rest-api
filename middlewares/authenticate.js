@@ -3,7 +3,7 @@ const User = require('../models/user');
 
 const authenticateUser = async (req, res, next) => {
   const authorizationHeader = req.get('Authorization');
-  if (!authorizationHeader) {
+  if (!authorizationHeader || !authorizationHeader.startsWith('Bearer ')) {
     return res.status(401).json({ message: 'Not authorized' });
   }
 
