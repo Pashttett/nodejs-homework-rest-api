@@ -2,6 +2,14 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const User = require('../models/user');
 const ctrlWrapper = require('../helpers/ctrlWrapper');
+const multer = require('multer');
+const jimp = require('jimp');
+const path = require('path');
+const fs = require('fs/promises');
+const gravatar = require('gravatar');
+
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
 
 const register = async (req, res) => {
   const { email, password } = req.body;
@@ -12,15 +20,17 @@ const register = async (req, res) => {
       return res.status(409).json({ message: 'Email is already in use' });
     }
 
+    const avatarURL = gravatar.url(email, { s: '250', r: 'pg', d: 'identicon' });
+
     const saltRounds = 10;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-    const newUser = new User({ email, password: hashedPassword });
+    const newUser = new User({ email, password: hashedPassword, avatarURL });
 
     await newUser.save();
 
     const token = jwt.sign({ userId: newUser._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-    res.status(201).json({ _id: newUser._id, email: newUser.email, subscription: newUser.subscription, createdAt: newUser.createdAt, updatedAt: newUser.updatedAt, token });
+    res.status(201).json({ _id: newUser._id, email: newUser.email, subscription: newUser.subscription, createdAt: newUser.createdAt, updatedAt: newUser.updatedAt, token, avatarURL });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: 'Registration failed' });
@@ -71,15 +81,48 @@ const getCurrentUser = (req, res) => {
   });
 };
 
-module.exports = {
-  register,
-  login,
-  logout,
-  getCurrentUser,
+const updateAvatar = async (req, res) => {
+  try {
+    const { user } = req;
+    const avatarData = req.file ? req.file.buffer : null;
+
+    if (!avatarData) {
+      return res.status(400).json({ message: 'No file found.' });
+    }
+    
+    const uniqueFilename = `${user._id}-${Date.now()}.png`;
+    const tmpAvatarPath = path.join(__dirname, '..', 'tmp', uniqueFilename);
+    const avatarPath = path.join(__dirname, '..', 'public', 'avatars', uniqueFilename);
+
+    try {
+      await fs.writeFile(tmpAvatarPath, avatarData);
+      const jimpImage = await jimp.read(tmpAvatarPath);
+      await jimpImage.cover(250, 250);
+      await jimpImage.writeAsync(tmpAvatarPath);
+      user.avatarURL = `/avatars/${uniqueFilename}`;
+    } catch (error) {
+      console.error(error);
+      return res.status(500).json({ message: 'Avatar processing failed', error: error.message });
+    }
+    await user.save();
+    await fs.rename(tmpAvatarPath, avatarPath);
+    
+    const updatedUser = await User.findByIdAndUpdate(user._id, { avatarURL: user.avatarURL }, { new: true });
+
+    if (!updatedUser) {
+      return res.status(500).json({ message: 'Avatar URL update failed' });
+    }
+    return res.status(200).json({ avatarURL: updatedUser.avatarURL });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: 'Avatar upload failed', error: error.message });
+  }
 };
+
 module.exports = {
   register: ctrlWrapper(register),
   login: ctrlWrapper(login),
   logout: ctrlWrapper(logout),
-  getCurrentUser: ctrlWrapper(getCurrentUser)
-}
+  getCurrentUser: ctrlWrapper(getCurrentUser),
+  updateAvatar: ctrlWrapper(updateAvatar),
+};
