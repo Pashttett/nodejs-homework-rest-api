@@ -7,12 +7,17 @@ const jimp = require('jimp');
 const path = require('path');
 const fs = require('fs/promises');
 const gravatar = require('gravatar');
+const sendEmail = require('../helpers/sendEmail');
+const { v4: uuidv4 } = require('uuid');
+
+require('dotenv').config();
 
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
 const register = async (req, res) => {
   const { email, password } = req.body;
+  const BASE_URL = process.env.BASE_URL;
 
   try {
     const user = await User.findOne({ email });
@@ -25,15 +30,95 @@ const register = async (req, res) => {
     const saltRounds = 10;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-    const newUser = new User({ email, password: hashedPassword, avatarURL });
+    const verificationToken = uuidv4();
+
+    const newUser = new User({ email, password: hashedPassword, avatarURL, verificationToken });
 
     await newUser.save();
 
-    const token = jwt.sign({ userId: newUser._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-    res.status(201).json({ _id: newUser._id, email: newUser.email, subscription: newUser.subscription, createdAt: newUser.createdAt, updatedAt: newUser.updatedAt, token, avatarURL });
+    await sendEmail(verifyEmail(email, verificationToken, BASE_URL));
+
+    res.status(201).json({
+      _id: newUser._id,
+      email: newUser.email,
+      subscription: newUser.subscription,
+      createdAt: newUser.createdAt,
+      updatedAt: newUser.updatedAt,
+      avatarURL,
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: 'Registration failed' });
+  }
+};
+
+
+const verifyEmail = (email, verificationToken, BASE_URL) => {
+  return {
+    to: email,
+    subject: `Verify email`,
+    html: `<p>Please click on the link below to verify</p>
+      <p>
+        <a target="_blank" href="${BASE_URL}/auth/verify/${verificationToken}">Click verify email</a>
+      </p>`,
+    text: `Please click on link below\n
+      ${BASE_URL}/auth/verify/${verificationToken}`,
+  };
+};
+
+
+const verifyUser = async (req, res) => {
+  const { verificationToken } = req.params;
+
+  try {
+    const user = await User.findOne({ verificationToken });
+
+    if (!user) {
+      return res.status(401).json({ message: 'User not found' });
+    }
+
+    if (user.verify) {
+      return res.status(400).json({ message: 'Verification has already been passed' });
+    }
+
+    await User.findOneAndUpdate(
+      { verificationToken },
+      { verify: true, verificationToken: null }
+    );
+
+    return res.json({ message: 'Verification successful' });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: 'Verification failed' });
+  }
+};
+
+
+const returnVerifyUser = async (req, res) => {
+  const { email } = req.body;
+
+  try {
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return res.status(400).json({ message: 'Missing required field email' });
+    }
+
+    if (user.verify) {
+      return res.status(400).json({ message: 'Verification has already been passed' });
+    }
+
+    if (user.verificationToken) {
+      const verificationToken = user.verificationToken;
+      const verificationEmail = verifyEmail(email, verificationToken, process.env.BASE_URL);
+      await sendEmail(verificationEmail);
+      return res.json({ message: 'Verification email sent' });
+    } else {
+      return res.status(400).json({ message: 'Verification token not found' });
+    }
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: 'Verification email sending failed' });
   }
 };
 
@@ -42,25 +127,37 @@ const login = async (req, res) => {
 
   try {
     const user = await User.findOne({ email });
+
     if (!user) {
       return res.status(401).json({ message: 'Email or password is incorrect' });
     }
 
+    if (!user.verify) {
+      return res.status(401).json({ message: 'Email is not verified' });
+    }
+
     const isPasswordValid = await bcrypt.compare(password, user.password);
+
     if (!isPasswordValid) {
       return res.status(401).json({ message: 'Email or password is incorrect' });
     }
 
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-    user.token = token;
-    await user.save();
 
-    res.json({ _id: user._id, email: user.email, subscription: user.subscription, createdAt: user.createdAt, updatedAt: user.updatedAt, token });
+    res.json({
+      _id: user._id,
+      email: user.email,
+      subscription: user.subscription,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+      token,
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: 'Login failed' });
   }
 };
+
 
 const logout = async (req, res) => {
   try {
@@ -89,7 +186,7 @@ const updateAvatar = async (req, res) => {
     if (!avatarData) {
       return res.status(400).json({ message: 'No file found.' });
     }
-    
+
     const uniqueFilename = `${user._id}-${Date.now()}.png`;
     const tmpAvatarPath = path.join(__dirname, '..', 'tmp', uniqueFilename);
     const avatarPath = path.join(__dirname, '..', 'public', 'avatars', uniqueFilename);
@@ -106,7 +203,7 @@ const updateAvatar = async (req, res) => {
     }
     await user.save();
     await fs.rename(tmpAvatarPath, avatarPath);
-    
+
     const updatedUser = await User.findByIdAndUpdate(user._id, { avatarURL: user.avatarURL }, { new: true });
 
     if (!updatedUser) {
@@ -125,4 +222,6 @@ module.exports = {
   logout: ctrlWrapper(logout),
   getCurrentUser: ctrlWrapper(getCurrentUser),
   updateAvatar: ctrlWrapper(updateAvatar),
+  verifyUser: ctrlWrapper(verifyUser),
+  returnVerifyUser: ctrlWrapper(returnVerifyUser),
 };
